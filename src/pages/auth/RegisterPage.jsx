@@ -7,13 +7,13 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { User, Mail, Lock, Chrome } from 'lucide-react';
-import { AuthContext } from '@/contexts/AuthContext';
 import { signUpSchema } from '@/schemas/auth';
+import { useGoogleAuth, useSignUp } from '@/hooks/useAuth';
 
 
 function RegisterPage() {
-    const navigate = useNavigate();
-    const { setUser } = useContext(AuthContext);
+    const { mutate: signUp, isPending: isSigningUp } = useSignUp();
+    const { mutate: googleAuth, isPending: isGoogleSigningIn } = useGoogleAuth();
 
     const form = useForm({
         resolver: zodResolver(signUpSchema),
@@ -28,11 +28,11 @@ function RegisterPage() {
 
 
     async function onSubmit(values) {
-        console.log(values);
+        signUp(values);
     }
 
     const handleGoogleLogin = async () => {
-        console.log("Google login");
+        googleAuth();
     };
 
     return (

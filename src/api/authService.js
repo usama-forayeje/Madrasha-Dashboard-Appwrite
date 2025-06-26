@@ -36,8 +36,8 @@ export class AuthService {
     try {
       const session = account.createOAuth2Session(
         "google",
-        `${window.location.origin}/auth/callback`,
-        `${window.location.origin}/auth/failure`
+        `${window.location.origin}/`,
+        `${window.location.origin}/login`
       );
       return session;
     } catch (error) {

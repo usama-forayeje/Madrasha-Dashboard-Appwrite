@@ -15,10 +15,11 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { signInSchema } from '@/schemas/auth';
+import { useGoogleAuth, useSignIn } from '@/hooks/useAuth';
 
 function LoginPage() {
-    const navigate = useNavigate();
-    const { setUser } = useContext(AuthContext);
+    const { mutate: signIn, isPending: isSigningIn } = useSignIn();
+    const { mutate: googleAuth, isPending: isGoogleSigningIn } = useGoogleAuth();
 
     const form = useForm({
         resolver: zodResolver(signInSchema),
@@ -31,12 +32,12 @@ function LoginPage() {
     const { isSubmitting } = form.formState;
 
     async function onSubmit(values) {
-        console.log(values);
+        signIn(values);
     }
 
 
     const handleGoogleLogin = async () => {
-        console.log("Google login");
+        googleAuth();
     };
 
 
