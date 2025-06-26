@@ -1,0 +1,20 @@
+# Node modules
+node_modules/
+
+# Build output
+build/
+dist/
+
+# Package lock file
+package-lock.json
+
+# Image files
+*.png
+*.jpg
+
+# Environment files
+.env
+
+# Other ignored files
+*.log
+*.log.*
