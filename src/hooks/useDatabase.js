@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { databaseService } from "@/api/dbService";
+import { useDeferredValue } from 'react';
 import { toast } from "sonner";
 
 // Query Keys
@@ -18,32 +19,62 @@ export const databaseKeys = {
   ],
   enrollments: (studentId, classId) => [...databaseKeys.all, "enrollments", { studentId, classId }],
   dashboardStats: () => [...databaseKeys.all, "dashboard-stats"],
+  analytics: () => [...databaseKeys.all, "analytics"],
 };
+
+// Helper function for error handling
+function getDatabaseErrorMessage(error) {
+  if (error?.message) {
+    return error.message;
+  }
+  if (error?.code === 401) {
+    return "Unauthorized access. Please log in again.";
+  }
+  if (error?.code === 404) {
+    return "No data found.";
+  }
+  if (error?.code === 409) {
+    return "Already exists.";
+  }
+  return "Something went wrong. Please try again later.";
+}
 
 // Students Hooks
 export function useStudents(limit = 25, offset = 0, search) {
+  const deferredSearch = useDeferredValue(search);
+  
   return useQuery({
-    queryKey: [...databaseKeys.students(), { limit, offset, search }],
-    queryFn: () => databaseService.getStudents(limit, offset, search),
-    staleTime: 2 * 60 * 1000, // 2 minutes
+    queryKey: [...databaseKeys.students(), { limit, offset, search: deferredSearch }],
+    queryFn: () => databaseService.getStudents(limit, offset, deferredSearch),
+    staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    keepPreviousData: true,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
 export function useInfiniteStudents({ search = "" } = {}) {
+  const deferredSearch = useDeferredValue(search);
+  
   return useInfiniteQuery({
-    queryKey: [...databaseKeys.students(), "infinite", { search }],
-
-    queryFn: ({ pageParam = 0 }) => databaseService.getStudents(25, pageParam, search),
-
+    queryKey: [...databaseKeys.students(), "infinite", { search: deferredSearch }],
+    queryFn: ({ pageParam = 0 }) => databaseService.getStudents(25, pageParam, deferredSearch),
     getNextPageParam: (lastPage, allPages) => {
       if (lastPage.documents.length === 25) {
-        const nextOffset = allPages.flatMap((page) => page.documents).length;
-        return nextOffset;
+        return allPages.flatMap(page => page.documents).length;
       }
-
       return undefined;
     },
     staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    enabled: deferredSearch.length >= 0,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -52,6 +83,12 @@ export function useStudent(studentId) {
     queryKey: databaseKeys.student(studentId),
     queryFn: () => databaseService.getStudent(studentId),
     enabled: !!studentId,
+    staleTime: 3 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -60,14 +97,22 @@ export function useCreateStudent() {
 
   return useMutation({
     mutationFn: (student) => databaseService.createStudent(student),
-    onSuccess: () => {
+    onMutate: () => {
+      toast.loading("Student is being created...", { id: "create-student" });
+    },
+    onSuccess: (newStudent) => {
+      toast.dismiss("create-student");
+      
+      queryClient.setQueryData(databaseKeys.student(newStudent.$id), newStudent);
       queryClient.invalidateQueries({ queryKey: databaseKeys.students() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
       toast.success("Student created successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to create student.");
-      console.error("Create student error:", error);
+      toast.dismiss("create-student");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -77,14 +122,38 @@ export function useUpdateStudent() {
 
   return useMutation({
     mutationFn: ({ studentId, updates }) => databaseService.updateStudent(studentId, updates),
-    onSuccess: (_, { studentId }) => {
+    onMutate: async ({ studentId, updates }) => {
+      toast.loading("Student is being updated...", { id: "update-student" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.student(studentId) });
+      
+      const previousStudent = queryClient.getQueryData(databaseKeys.student(studentId));
+      
+      queryClient.setQueryData(databaseKeys.student(studentId), (old) => ({
+        ...old,
+        ...updates,
+        $updatedAt: new Date().toISOString()
+      }));
+      
+      return { previousStudent };
+    },
+    onSuccess: (updatedStudent, { studentId }) => {
+      toast.dismiss("update-student");
+      
+      queryClient.setQueryData(databaseKeys.student(studentId), updatedStudent);
       queryClient.invalidateQueries({ queryKey: databaseKeys.students() });
-      queryClient.invalidateQueries({ queryKey: databaseKeys.student(studentId) });
+      
       toast.success("Student updated successfully!");
     },
-    onError: (error) => {
-      toast.error(error.message || "Failed to update student.");
-      console.error("Update student error:", error);
+    onError: (error, { studentId }, context) => {
+      toast.dismiss("update-student");
+      
+      if (context?.previousStudent) {
+        queryClient.setQueryData(databaseKeys.student(studentId), context.previousStudent);
+      }
+      
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -94,17 +163,39 @@ export function useDeleteStudent() {
 
   return useMutation({
     mutationFn: (studentId) => databaseService.deleteStudent(studentId),
+    onMutate: async (studentId) => {
+      toast.loading("Student is being deleted...", { id: "delete-student" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.student(studentId) });
+      
+      const previousStudent = queryClient.getQueryData(databaseKeys.student(studentId));
+      
+      queryClient.removeQueries({ queryKey: databaseKeys.student(studentId) });
+      
+      return { previousStudent };
+    },
     onSuccess: () => {
+      toast.dismiss("delete-student");
+      
       queryClient.invalidateQueries({ queryKey: databaseKeys.students() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.enrollments() });
+      
       toast.success("Student deleted successfully!");
     },
-    onError: (error) => {
-      toast.error(error.message || "Failed to delete student.");
-      console.error("Delete student error:", error);
+    onError: (error, studentId, context) => {
+      toast.dismiss("delete-student");
+      
+      if (context?.previousStudent) {
+        queryClient.setQueryData(databaseKeys.student(studentId), context.previousStudent);
+      }
+      
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
+
 
 // Teachers Hooks
 export function useTeachers(limit = 25, offset = 0) {
@@ -112,6 +203,12 @@ export function useTeachers(limit = 25, offset = 0) {
     queryKey: [...databaseKeys.teachers(), { limit, offset }],
     queryFn: () => databaseService.getTeachers(limit, offset),
     staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    keepPreviousData: true,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -120,6 +217,12 @@ export function useTeacher(teacherId) {
     queryKey: databaseKeys.teacher(teacherId),
     queryFn: () => databaseService.getTeacher(teacherId),
     enabled: !!teacherId,
+    staleTime: 3 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -128,14 +231,22 @@ export function useCreateTeacher() {
 
   return useMutation({
     mutationFn: (teacher) => databaseService.createTeacher(teacher),
-    onSuccess: () => {
+    onMutate: () => {
+      toast.loading("Teacher is being created...", { id: "create-teacher" });
+    },
+    onSuccess: (newTeacher) => {
+      toast.dismiss("create-teacher");
+      
+      queryClient.setQueryData(databaseKeys.teacher(newTeacher.$id), newTeacher);
       queryClient.invalidateQueries({ queryKey: databaseKeys.teachers() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
       toast.success("Teacher created successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to create teacher.");
-      console.error("Create teacher error:", error);
+      toast.dismiss("create-teacher");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -145,14 +256,38 @@ export function useUpdateTeacher() {
 
   return useMutation({
     mutationFn: ({ teacherId, updates }) => databaseService.updateTeacher(teacherId, updates),
-    onSuccess: (_, { teacherId }) => {
+    onMutate: async ({ teacherId, updates }) => {
+      toast.loading("Teacher is being updated...", { id: "update-teacher" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
+      const previousTeacher = queryClient.getQueryData(databaseKeys.teacher(teacherId));
+      
+      queryClient.setQueryData(databaseKeys.teacher(teacherId), (old) => ({
+        ...old,
+        ...updates,
+        $updatedAt: new Date().toISOString()
+      }));
+      
+      return { previousTeacher };
+    },
+    onSuccess: (updatedTeacher, { teacherId }) => {
+      toast.dismiss("update-teacher");
+      
+      queryClient.setQueryData(databaseKeys.teacher(teacherId), updatedTeacher);
       queryClient.invalidateQueries({ queryKey: databaseKeys.teachers() });
-      queryClient.invalidateQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
       toast.success("Teacher updated successfully!");
     },
-    onError: (error) => {
-      toast.error(error.message || "Failed to update teacher.");
-      console.error("Update teacher error:", error);
+    onError: (error, { teacherId }, context) => {
+      toast.dismiss("update-teacher");
+      
+      if (context?.previousTeacher) {
+        queryClient.setQueryData(databaseKeys.teacher(teacherId), context.previousTeacher);
+      }
+      
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -162,14 +297,34 @@ export function useDeleteTeacher() {
 
   return useMutation({
     mutationFn: (teacherId) => databaseService.deleteTeacher(teacherId),
+    onMutate: async (teacherId) => {
+      toast.loading("Teacher is being deleted...", { id: "delete-teacher" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
+      const previousTeacher = queryClient.getQueryData(databaseKeys.teacher(teacherId));
+      
+      queryClient.removeQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
+      return { previousTeacher };
+    },
     onSuccess: () => {
+      toast.dismiss("delete-teacher");
+      
       queryClient.invalidateQueries({ queryKey: databaseKeys.teachers() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
       toast.success("Teacher deleted successfully!");
     },
-    onError: (error) => {
-      toast.error(error.message || "Failed to delete teacher.");
-      console.error("Delete teacher error:", error);
+    onError: (error, teacherId, context) => {
+      toast.dismiss("delete-teacher");
+      
+      if (context?.previousTeacher) {
+        queryClient.setQueryData(databaseKeys.teacher(teacherId), context.previousTeacher);
+      }
+      
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -180,6 +335,12 @@ export function useClasses(limit = 25, offset = 0) {
     queryKey: [...databaseKeys.classes(), { limit, offset }],
     queryFn: () => databaseService.getClasses(limit, offset),
     staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    keepPreviousData: true,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -188,6 +349,12 @@ export function useClass(classId) {
     queryKey: databaseKeys.class(classId),
     queryFn: () => databaseService.getClass(classId),
     enabled: !!classId,
+    staleTime: 3 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -196,14 +363,22 @@ export function useCreateClass() {
 
   return useMutation({
     mutationFn: (classData) => databaseService.createClass(classData),
-    onSuccess: () => {
+    onMutate: () => {
+      toast.loading("Class is being created...", { id: "create-class" });
+    },
+    onSuccess: (newClass) => {
+      toast.dismiss("create-class");
+      
+      queryClient.setQueryData(databaseKeys.class(newClass.$id), newClass);
       queryClient.invalidateQueries({ queryKey: databaseKeys.classes() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
       toast.success("Class created successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to create class.");
-      console.error("Create class error:", error);
+      toast.dismiss("create-class");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -213,9 +388,28 @@ export function useUpdateClass() {
 
   return useMutation({
     mutationFn: ({ classId, updates }) => databaseService.updateClass(classId, updates),
-    onSuccess: (_, { classId }) => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.classes() });
-      queryClient.invalidateQueries({ queryKey: databaseKeys.class(classId) });
+    onMutate: async ({ classId, updates }) => {
+      toast.loading("ক্লাস আপডেট হচ্ছে...", { id: "update-class" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.class(classId) });
+      
+      const previousClass = queryClient.getQueryData(databaseKeys.class(classId));
+      
+      queryClient.setQueryData(databaseKeys.class(classId), (old) => ({
+        ...old,
+        ...updates,
+        $updatedAt: new Date().toISOString()
+      }));
+      
+      return { previousClass };
+    },
+    onSuccess: (updatedClass, { classId }) => {
+      toast.dismiss("update-class");
+      
+      queryClient.setQueryData(databaseKeys.  
+      queryClient.invalidateQueries({ queryKey: databaseKeys.classes() })
+      queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() })
+      
       toast.success("Class updated successfully!");
     },
     onError: (error) => {
@@ -225,61 +419,108 @@ export function useUpdateClass() {
   });
 }
 
-export function useDeleteClass() {
+export function useDeleteTeacher() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (classId) => databaseService.deleteClass(classId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.classes() });
-      queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
-      toast.success("Class deleted successfully!");
+    mutationFn: (teacherId) => databaseService.deleteTeacher(teacherId),
+    onMutate: async (teacherId) => {
+      toast.loading("Teacher is being deleted...", { id: "delete-teacher" });
+      
+      await queryClient.cancelQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
+      const previousTeacher = queryClient.getQueryData(databaseKeys.teacher(teacherId));
+      
+      queryClient.removeQueries({ queryKey: databaseKeys.teacher(teacherId) });
+      
+      return { previousTeacher };
     },
-    onError: (error) => {
-      toast.error(error.message || "Failed to delete class.");
-      console.error("Delete class error:", error);
+    onSuccess: () => {
+      toast.dismiss("delete-teacher");
+      
+      queryClient.invalidateQueries({ queryKey: databaseKeys.teachers() });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
+      toast.success("Teacher deleted successfully!");
+    },
+    onError: (error, teacherId, context) => {
+      toast.dismiss("delete-teacher");
+      
+      if (context?.previousTeacher) {
+        queryClient.setQueryData(databaseKeys.teacher(teacherId), context.previousTeacher);
+      }
+      
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
 
 // Attendance Hooks
-export function useAttendance(classId, studentId, date) {
+export function useAttendance(classId, date) {
   return useQuery({
-    queryKey: databaseKeys.attendance(classId, studentId, date),
-    queryFn: () => databaseService.getAttendance(classId, studentId, date),
-    staleTime: 1 * 60 * 1000, // 1 minute
+    queryKey: databaseKeys.attendance(classId, null, date),
+    queryFn: () => databaseService.getAttendance(classId, date),
+    enabled: !!classId && !!date,
+    staleTime: 30 * 1000, // 30 seconds
+    gcTime: 2 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
-export function useCreateAttendance() {
+export function useMarkAttendance() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (attendance) => databaseService.createAttendance(attendance),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.all });
+    mutationFn: ({ classId, studentId, date, status, notes }) => 
+      databaseService.markAttendance(classId, studentId, date, status, notes),
+    onMutate: () => {
+      toast.loading("Attendance is being recorded...", { id: "mark-attendance" });
+    },
+    onSuccess: (_, { classId, date }) => {
+      toast.dismiss("mark-attendance");
+      
+      queryClient.invalidateQueries({ 
+        queryKey: databaseKeys.attendance(classId, null, date) 
+      });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.analytics() });
+      
       toast.success("Attendance recorded successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to record attendance.");
-      console.error("Create attendance error:", error);
+      toast.dismiss("mark-attendance");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
 
-export function useUpdateAttendance() {
+export function useBulkMarkAttendance() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ attendanceId, updates }) =>
-      databaseService.updateAttendance(attendanceId, updates),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.all });
-      toast.success("Attendance updated successfully!");
+    mutationFn: ({ classId, date, attendanceRecords }) => 
+      databaseService.bulkMarkAttendance(classId, date, attendanceRecords),
+    onMutate: () => {
+      toast.loading("All attendance is being recorded...", { id: "bulk-attendance" });
+    },
+    onSuccess: (_, { classId, date }) => {
+      toast.dismiss("bulk-attendance");
+      
+      queryClient.invalidateQueries({ 
+        queryKey: databaseKeys.attendance(classId, null, date) 
+      });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.analytics() });
+      
+      toast.success("All attendance recorded successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to update attendance.");
-      console.error("Update attendance error:", error);
+      toast.dismiss("bulk-attendance");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
@@ -289,7 +530,13 @@ export function useEnrollments(studentId, classId) {
   return useQuery({
     queryKey: databaseKeys.enrollments(studentId, classId),
     queryFn: () => databaseService.getEnrollments(studentId, classId),
-    staleTime: 2 * 60 * 1000,
+    enabled: !!studentId || !!classId,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }
 
@@ -297,42 +544,79 @@ export function useCreateEnrollment() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (enrollment) => databaseService.createEnrollment(enrollment),
+    mutationFn: ({ studentId, classId, enrollmentDate }) => 
+      databaseService.createEnrollment(studentId, classId, enrollmentDate),
+    onMutate: () => {
+      toast.loading("Enrollment is being created...", { id: "create-enrollment" });
+    },
     onSuccess: () => {
+      toast.dismiss("create-enrollment");
+      
       queryClient.invalidateQueries({ queryKey: databaseKeys.enrollments() });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.students() });
       queryClient.invalidateQueries({ queryKey: databaseKeys.classes() });
-      toast.success("Student enrolled successfully!");
+      queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
+      toast.success("Enrollment created successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to enroll student.");
-      console.error("Create enrollment error:", error);
+      toast.dismiss("create-enrollment");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
 
-export function useUpdateEnrollment() {
+export function useDeleteEnrollment() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ enrollmentId, updates }) =>
-      databaseService.updateEnrollment(enrollmentId, updates),
+    mutationFn: (enrollmentId) => databaseService.deleteEnrollment(enrollmentId),
+    onMutate: () => {
+      toast.loading("Enrollments are being deleted...", { id: "delete-enrollment" });
+    },
     onSuccess: () => {
+      toast.dismiss("delete-enrollment");
+      
       queryClient.invalidateQueries({ queryKey: databaseKeys.enrollments() });
-      toast.success("Enrollment updated successfully!");
+      queryClient.invalidateQueries({ queryKey: databaseKeys.students() });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.classes() });
+      queryClient.invalidateQueries({ queryKey: databaseKeys.dashboardStats() });
+      
+      toast.success("Enrollments deleted successfully!");
     },
     onError: (error) => {
-      toast.error(error.message || "Failed to update enrollment.");
-      console.error("Update enrollment error:", error);
+      toast.dismiss("delete-enrollment");
+      const errorMessage = getDatabaseErrorMessage(error);
+      toast.error(errorMessage);
     },
   });
 }
 
-// Dashboard Stats Hook
+// Dashboard and Analytics Hooks
 export function useDashboardStats() {
   return useQuery({
     queryKey: databaseKeys.dashboardStats(),
     queryFn: () => databaseService.getDashboardStats(),
-    staleTime: 5 * 60 * 1000, // 5 minutes
-    refetchInterval: 5 * 60 * 1000, // Refetch every 5 minutes
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
+  });
+}
+
+export function useAnalytics(dateRange) {
+  return useQuery({
+    queryKey: [...databaseKeys.analytics(), { dateRange }],
+    queryFn: () => databaseService.getAnalytics(dateRange),
+    enabled: !!dateRange,
+    staleTime: 2 * 60 * 1000,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    meta: {
+      requiresAuth: true
+    }
   });
 }

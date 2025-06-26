@@ -1,30 +1,66 @@
-import RootLayout from "@/components/layout/RootLayout";
+
 import { createBrowserRouter } from "react-router";
-import { AuthGuard, ProtectedRoute, RoleBasedRoute } from "./guards";
 import { lazy } from "react";
-import { authRoutes } from "@/features/auth/routes";
-import { adminRoutes } from "@/features/dashboard/admin/routes";
-const LandingPage = lazy(() => import("@/pages/LandingPage"));
+import PublicLayout from "@/layouts/PublicLayout";
+import AdminLayout from "@/layouts/AdminLayout";
+import { AdminRoute } from "./ProtectedRoutes";
+import AuthLayout from "@/layouts/AuthLayout";
+
+const LandingPage = lazy(() => import("@/pages/public/LandingPage"));
 const NotFoundPage = lazy(() => import("@/pages/NotFound"));
+const RegisterPage = lazy(() => import("@/pages/auth/RegisterPage"));
+const LoginPage = lazy(() => import("@/pages/auth/LoginPage"));
 
 export const router = createBrowserRouter([
   {
-    element: <RootLayout />,
+    path: '/',
+    element: <PublicLayout />,
     children: [
       {
-        element: <AuthGuard />,
-        children: [{ index: true, element: <LandingPage /> }, authRoutes],
+        index: true,
+        element: <LandingPage />,
       },
+      // এখানে অন্যান্য পাবলিক পেজ যোগ করুন
+      // { path: 'about-us', element: <AboutUs /> },
+    ],
+  },
+
+  // Auth Routes
+  {
+    element: <AuthLayout />, 
+    children: [
       {
-        element: <ProtectedRoute />,
+        path: '/login',
+        element: <LoginPage />,
+      },
+      { path: '/register', element: <RegisterPage /> },
+
+    ]
+  },
+
+
+  // Admin Protected Routes (শুধুমাত্র অ্যাডমিনরা দেখতে পারবে)
+  {
+    path: '/admin',
+    element: <AdminRoute />,
+    children: [
+      {
+        element: <AdminLayout />,
         children: [
           {
-            element: <RoleBasedRoute allowedRoles={["admin", "super_admin"]} />,
-            children: [adminRoutes],
+            index: true,
+            // element: <Dashboard />,
           },
+          // { path: 'students', element: <Students /> },
+          // { path: 'teachers', element: <Teachers /> },
         ],
       },
-      { path: "*", element: <NotFoundPage /> },
     ],
+  },
+
+  // Not Found Route
+  {
+    path: '*',
+    element: <NotFoundPage />,
   },
 ]);
